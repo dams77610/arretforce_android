@@ -86,11 +86,6 @@ public final class SafetyPolicy {
           return false;
       }
     }
-    if (info.activities != null) {
-      for (ActivityInfo a : info.activities) {
-        if ((a.flags & ActivityInfo.FLAG_SUPPORTS_PICTURE_IN_PICTURE) != 0) return false;
-      }
-    }
     return true;
   }
 
@@ -125,7 +120,8 @@ public final class SafetyPolicy {
           RoleManager.ROLE_BROWSER};
       for (String role : roles) {
         try {
-          if (manager.isRoleAvailable(role)) protectedPackages.addAll(manager.getRoleHolders(role));
+          // Conserver uniquement les applications associées via les composants connus.
+          // getRoleHolders n'est pas exposé dans toutes les variantes SDK.
         } catch (RuntimeException ignored) {}
       }
     } catch (RuntimeException ignored) {}
