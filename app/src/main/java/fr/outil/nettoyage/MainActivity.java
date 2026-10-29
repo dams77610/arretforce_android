@@ -138,7 +138,7 @@ public final class MainActivity extends Activity {
     });
     setContentView(root);
 
-    TextView eyebrow = text("ENTRETIEN ANDROID  ·  V0.2", 12, TEAL, true);
+    TextView eyebrow = text("ENTRETIEN ANDROID  ·  V0.3.2", 12, TEAL, true);
     root.addView(eyebrow);
     root.addView(text("Nettoyage sûr", 29, DARK, true), margins(0, 2, 0, 0));
 
@@ -312,12 +312,10 @@ public final class MainActivity extends Activity {
         for (PackageInfo pkg : pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)) {
           if (pkg.applicationInfo == null) continue;
           String title = String.valueOf(pm.getApplicationLabel(pkg.applicationInfo));
-          boolean hard = policy.isHardProtected(pkg);
-          boolean caution = !hard && policy.isCaution(pkg);
-          boolean system = (pkg.applicationInfo.flags &
-              (ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0;
-          inventory.add(new Entry(pkg.packageName, title, system, hard, caution,
-              running.contains(pkg.packageName)));
+          String hardReason = policy.hardReason(pkg);
+          String cautionReason = hardReason == null ? policy.cautionReason(pkg) : null;
+          inventory.add(new Entry(pkg.packageName, title, policy.isSystem(pkg),
+              hardReason, cautionReason, running.contains(pkg.packageName)));
         }
         Collections.sort(inventory, (a, b) -> a.title.compareToIgnoreCase(b.title));
         final boolean canInspect = valid && !running.isEmpty();
@@ -387,8 +385,9 @@ public final class MainActivity extends Activity {
       new AlertDialog.Builder(this)
           .setTitle("Protection conseillée")
           .setMessage(item.title + " peut assurer des notifications, des alarmes ou un service utile." +
-              "\\n\\nSon arrêt forcé peut perturber ces fonctions jusqu'à sa réouverture." +
-              "\\n\\nVeux-tu vraiment la sélectionner ?")
+              "\n\nRaison : " + item.cautionReason +
+              "\n\nSon arrêt forcé peut perturber ces fonctions jusqu'à sa réouverture." +
+              "\n\nVeux-tu vraiment la sélectionner ?")
           .setNegativeButton("Annuler", (d, which) -> adapter.notifyDataSetChanged())
           .setPositiveButton("Choisir quand même", (d, which) -> {
             if (!busy) {
@@ -545,15 +544,18 @@ public final class MainActivity extends Activity {
       labels.addView(name);
       String state;
       if (item.hardProtected)
-        state = item.system ? "Système · arrêt désactivé" : "Fonction essentielle · arrêt désactivé";
+        state = item.system ? "Système · arrêt interdit" : "Fonction active · arrêt interdit";
       else if (item.caution)
         state = selected.contains(item.pkg) ? "Attention · sélection confirmée" :
-            "Attention · protection conseillée, choix possible";
+            "Prudence · " + item.cautionReason;
       else if (!snapshotValid)
         state = "Activité inconnue · choix manuel possible";
       else
         state = item.running ? "Processus détecté · sélectionnable" : "Pas de processus détecté";
-      labels.addView(text(state, 11, item.hardProtected ? MUTED : TEAL, false));
+      TextView stateView = text(state, 11, item.hardProtected ? MUTED : TEAL, false);
+      stateView.setMaxLines(2);
+      stateView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+      labels.addView(stateView);
 
       if (item.hardProtected) {
         TextView lock = text("🔒", 19, MUTED, false);
@@ -566,7 +568,20 @@ public final class MainActivity extends Activity {
         checkbox.setOnClickListener(v -> toggle(item));
         row.addView(checkbox, new LinearLayout.LayoutParams(dp(44), dp(48)));
       }
-      row.setOnClickListener(v -> toggle(item));
+      row.setOnClickListener(v -> {
+        if (item.hardProtected) {
+          new AlertDialog.Builder(MainActivity.this)
+              .setTitle("Pourquoi cette application est verrouillée ?")
+              .setMessage(item.title + "\n" + item.pkg +
+                  "\n\nRaison : " + item.hardReason +
+                  "\n\n" + (item.system
+                      ? "Android considère ce paquet comme préinstallé ou comme une mise à jour d'une application système."
+                      : "Cette application tierce assure actuellement une fonction essentielle. Pour éviter un dysfonctionnement du téléphone, elle n'est pas arrêtée par cet outil.") +
+                  "\n\nLe simple fait d'avoir mis une application à jour ne signifie pas qu'elle n'est plus système.")
+              .setPositiveButton("Compris", null)
+              .show();
+        } else toggle(item);
+      });
       return row;
     }
   }
@@ -574,13 +589,16 @@ public final class MainActivity extends Activity {
   private static final class Entry {
     final String pkg, title;
     final boolean system, hardProtected, caution, running;
-    Entry(String pkg, String title, boolean system, boolean hardProtected,
-          boolean caution, boolean running) {
+    final String hardReason, cautionReason;
+    Entry(String pkg, String title, boolean system, String hardReason,
+          String cautionReason, boolean running) {
       this.pkg = pkg;
       this.title = title;
       this.system = system;
-      this.hardProtected = hardProtected;
-      this.caution = caution;
+      this.hardReason = hardReason;
+      this.cautionReason = cautionReason;
+      this.hardProtected = hardReason != null;
+      this.caution = cautionReason != null;
       this.running = running;
     }
   }
