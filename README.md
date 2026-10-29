@@ -1,22 +1,26 @@
-# arretforce_android / Nettoyage sûr V0.1
+# Nettoyage sûr V0.2 — Android / Shizuku
 
-Application Android expérimentale **sans root**, avec **Shizuku 13.5**.
+Application Android personnelle, **sans root et sans ordinateur**, pour inventorier les applications et sélectionner manuellement celles à forcer à s'arrêter.
 
-- Un bouton : « Nettoyer maintenant ».
-- Analyse locale des processus via service Shizuku, sous identité shell.
-- Préservation des composants système, applications constructeur et de nombreuses applications sensibles par règles conservatrices.
-- Commande d'arrêt forcé ciblée uniquement sur des packages tiers filtrés.
-- Second relevé pour distinguer les arrêts confirmés des incertains.
-- Pas d'accès réseau, pas de nettoyage automatique et pas d'accès aux fichiers personnels.
+## Nouveautés de la V0.2
 
-**Avertissement** : un processus présent en RAM n'est pas nécessairement nuisible. Forcer l'arrêt d'une application peut interrompre ses notifications et ses tâches jusqu'à son redémarrage. Aucun gain de performance n'est garanti. Les règles de protection ne garantissent pas l'absence totale d'effets secondaires. Prototype à tester sur l'appareil.
+- Liste visible et consultable avec noms et icônes des applications.
+- Filtres **En cours**, **Toutes** et **Protégées** ; recherche.
+- Cases à cocher et **arrêt groupé uniquement sur demande**.
+- Les applications système et essentielles sont visibles mais non sélectionnables.
+- Les applications sans processus détecté ne sont pas sélectionnables.
+- Réanalyse immédiatement avant la commande d'arrêt.
+- Aucune sélection pré-cochée, aucune exécution en arrière-plan.
 
-## Compiler et installer
+## Limites
 
-Voir [GUIDE_INSTALLATION.md](GUIDE_INSTALLATION.md).
+La présence d'un processus n'implique pas une consommation excessive de batterie ou de RAM.
+L'arrêt forcé peut interrompre notifications, synchronisations ou autres tâches d'une application jusqu'à sa réouverture.
+La liste de protection est conservatrice mais ne garantit pas l'absence totale d'effets secondaires.
+Si Shizuku n'est pas disponible, la liste des applications reste consultable, mais aucun arrêt n'est possible.
 
-Compilation GitHub Actions : `gradle :app:assembleDebug`, Java 17, Android Gradle Plugin 8.7.3, Android SDK 35, Gradle 8.9.
+## Installer l'APK
 
-## État
+Ouvrir **Actions → Compiler APK Android** et télécharger l'artefact **NettoyageSur-APK** de la dernière compilation réussie. Décompresser puis installer `app-debug.apk` sur le téléphone. L'application utilise Shizuku 13.5 préalablement démarré.
 
-Sources ajoutées depuis le projet Nettoyage Android V0.1 et légèrement durcies. Compilation et compatibilité matérielle à confirmer par le statut du workflow et les essais Vivo Android 16.
+Version de test à valider sur Vivo Android 16.

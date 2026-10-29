@@ -4,20 +4,31 @@ import android.app.Activity;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.IBinder;
-import android.os.RemoteException;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.BaseAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
+import android.widget.ListView;
 import android.widget.TextView;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -27,298 +38,519 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
 import rikka.shizuku.Shizuku;
 
-/** Un bouton unique. Aucune exécution sans action de l'utilisateur. */
+/**
+ * V0.2 : inventaire visible, choix manuel uniquement, protection stricte.
+ * Un processus présent ne signifie pas qu'il consomme inutilement la RAM/batterie.
+ */
 public final class MainActivity extends Activity {
-  private static final int REQUEST_SHIZUKU = 3102;
-  private static final int DARK = Color.rgb(27,54,53);
-  private static final int TEAL = Color.rgb(32,119,111);
-  private static final int MUTED = Color.rgb(100,117,114);
-  private final ExecutorService executor = Executors.newSingleThreadExecutor();
-  private TextView status, detail, total, result;
-  private Button button;
-  private boolean busy, pendingCleanup, bound;
-  private ICleanerService cleaner;
-  private Shizuku.UserServiceArgs serviceArgs;
+  private static final int SHIZUKU_PERMISSION = 3102;
+  private static final int DARK = Color.rgb(25, 54, 53);
+  private static final int TEAL = Color.rgb(0, 123, 114);
+  private static final int MUTED = Color.rgb(106, 119, 117);
+  private static final int BG = Color.rgb(245, 248, 247);
 
-  private final Shizuku.OnBinderReceivedListener received = () -> runOnUiThread(this::refresh);
+  private final ExecutorService worker = Executors.newSingleThreadExecutor();
+  private final List<Entry> entries = new ArrayList<>();
+  private final List<Entry> filtered = new ArrayList<>();
+  private final Set<String> selected = new HashSet<>();
+
+  private TextView status, overview, empty, chosen, report;
+  private Button scanButton, stopButton, runningTab, allTab, protectedTab;
+  private EditText search;
+  private ListView list;
+  private EntryAdapter adapter;
+  private ICleanerService cleaner;
+  private Shizuku.UserServiceArgs userArgs;
+  private boolean busy = false, binding = false, bound = false, snapshotValid = false, loaded = false;
+  private int tab = 0; // 0 processus présents, 1 toutes installées, 2 protégées
+
+  private final Shizuku.OnBinderReceivedListener received = () ->
+      runOnUiThread(() -> { if (!busy && !binding) requestScan(false); });
   private final Shizuku.OnBinderDeadListener dead = () -> runOnUiThread(() -> {
     cleaner = null;
     bound = false;
-    showFailure("Shizuku s'est arrêté. Relance Shizuku pour continuer.");
+    binding = false;
+    snapshotValid = false;
+    selected.clear();
+    report.setText("Shizuku s'est arrêté. Les arrêts sont désactivés.");
+    refreshUi("Shizuku arrêté");
   });
-  private final Shizuku.OnRequestPermissionResultListener permission = (code, grant) -> {
-    if (code != REQUEST_SHIZUKU) return;
+  private final Shizuku.OnRequestPermissionResultListener permission = (requestCode, grant) -> {
+    if (requestCode != SHIZUKU_PERMISSION) return;
     runOnUiThread(() -> {
-      if (grant == PackageManager.PERMISSION_GRANTED && pendingCleanup) bindAndClean();
-      else showFailure("Autorisation Shizuku refusée. Aucun arrêt effectué.");
+      if (grant == PackageManager.PERMISSION_GRANTED) requestScan(false);
+      else {
+        report.setText("Autorisation Shizuku refusée. Aucune application ne sera arrêtée.");
+        loadEntries(null);
+      }
     });
   };
   private final ServiceConnection connection = new ServiceConnection() {
     @Override public void onServiceConnected(ComponentName name, IBinder binder) {
       runOnUiThread(() -> {
         cleaner = ICleanerService.Stub.asInterface(binder);
+        binding = false;
         bound = true;
-        if (pendingCleanup) runCleanup();
+        loadEntries(cleaner);
       });
     }
     @Override public void onServiceDisconnected(ComponentName name) {
       runOnUiThread(() -> {
         cleaner = null;
+        binding = false;
         bound = false;
-        if (busy) showFailure("Connexion à Shizuku interrompue.");
+        snapshotValid = false;
+        selected.clear();
+        report.setText("Connexion à Shizuku interrompue.");
+        refreshUi("Connexion interrompue");
       });
     }
   };
 
-  @Override public void onCreate(Bundle state) {
-    super.onCreate(state);
+  @Override public void onCreate(Bundle savedInstanceState) {
+    super.onCreate(savedInstanceState);
     createUi();
     Shizuku.addBinderReceivedListenerSticky(received);
     Shizuku.addBinderDeadListener(dead);
     Shizuku.addRequestPermissionResultListener(permission);
-    refresh();
+    if (!busy && !binding && !loaded) requestScan(false);
   }
 
   private void createUi() {
-    ScrollView scroll = new ScrollView(this);
-    scroll.setFillViewport(true);
-    scroll.setBackgroundColor(Color.rgb(244,247,246));
     LinearLayout root = new LinearLayout(this);
     root.setOrientation(LinearLayout.VERTICAL);
-    root.setPadding(dp(22),dp(34),dp(22),dp(30));
-    scroll.addView(root);
-    TextView eyebrow = label("ENTRETIEN ANDROID",12,TEAL,true);
+    root.setBackgroundColor(BG);
+    root.setPadding(dp(17), dp(19), dp(17), dp(12));
+    setContentView(root);
+
+    TextView eyebrow = text("ENTRETIEN ANDROID  ·  V0.2", 12, TEAL, true);
     root.addView(eyebrow);
-    root.addView(label("Nettoyage sûr",32,DARK,true), margin(0,10,0,8));
-    root.addView(label("Arrêter les applications non essentielles détectées en arrière-plan.",15,MUTED,false));
-    LinearLayout card = new LinearLayout(this);
-    card.setOrientation(LinearLayout.VERTICAL);
-    card.setPadding(dp(22),dp(26),dp(22),dp(25));
-    card.setBackground(shape(Color.WHITE,26));
-    root.addView(card,margin(0,26,0,0));
-    status = label("Vérification de Shizuku…",14,TEAL,true);
-    card.addView(status);
-    total = label("—",70,DARK,true);
-    total.setGravity(Gravity.CENTER);
-    card.addView(total,margin(0,20,0,0));
-    TextView countLabel = label("arrêts vérifiés au dernier nettoyage",13,MUTED,false);
-    countLabel.setGravity(Gravity.CENTER);
-    card.addView(countLabel);
-    button = new Button(this);
-    button.setAllCaps(false);
-    button.setText("Nettoyer maintenant");
-    button.setTextSize(16);
-    button.setTextColor(Color.WHITE);
-    button.setTypeface(Typeface.DEFAULT,Typeface.BOLD);
-    button.setBackground(shape(TEAL,17));
-    button.setMinHeight(dp(64));
-    button.setOnClickListener(v -> action());
-    card.addView(button,margin(0,26,0,0));
-    detail = label("Aucune action sans ton accord.",13,MUTED,false);
-    detail.setGravity(Gravity.CENTER);
-    card.addView(detail,margin(0,15,0,0));
-    root.addView(label("Dernier bilan",18,DARK,true),margin(0,28,0,12));
-    result = label("Aucune analyse effectuée.",14,MUTED,false);
-    result.setPadding(dp(17),dp(19),dp(17),dp(19));
-    result.setBackground(shape(Color.WHITE,17));
-    root.addView(result);
-    root.addView(label("Protection stricte des applications système et sensibles. Un arrêt forcé peut interrompre les notifications, tâches et synchronisations d'une application jusqu'à sa réouverture. Aucune amélioration de batterie ou de RAM n'est garantie.",12,MUTED,false),margin(0,25,0,0));
-    setContentView(scroll);
+    root.addView(text("Nettoyage sûr", 29, DARK, true), margins(0, 2, 0, 0));
+
+    LinearLayout top = new LinearLayout(this);
+    top.setGravity(Gravity.CENTER_VERTICAL);
+    root.addView(top, margins(0, 12, 0, 5));
+    status = text("Préparation de l'inventaire…", 13, TEAL, true);
+    top.addView(status, new LinearLayout.LayoutParams(0, dp(48), 1));
+    status.setGravity(Gravity.CENTER_VERTICAL);
+
+    scanButton = new Button(this);
+    scanButton.setText("Actualiser");
+    scanButton.setTextSize(13);
+    scanButton.setAllCaps(false);
+    scanButton.setTextColor(TEAL);
+    scanButton.setBackground(background(Color.WHITE, 13));
+    scanButton.setOnClickListener(v -> requestScan(true));
+    top.addView(scanButton, new LinearLayout.LayoutParams(dp(106), dp(48)));
+
+    overview = text("Chargement…", 13, MUTED, false);
+    root.addView(overview, margins(0, 0, 0, 11));
+
+    LinearLayout tabs = new LinearLayout(this);
+    tabs.setOrientation(LinearLayout.HORIZONTAL);
+    root.addView(tabs, margins(0, 0, 0, 9));
+    runningTab = tabButton(tabs, "En cours", 0);
+    allTab = tabButton(tabs, "Toutes", 1);
+    protectedTab = tabButton(tabs, "Protégées", 2);
+
+    search = new EditText(this);
+    search.setSingleLine(true);
+    search.setTextSize(15);
+    search.setTextColor(DARK);
+    search.setHintTextColor(MUTED);
+    search.setHint("Rechercher une application");
+    search.setPadding(dp(13), 0, dp(13), 0);
+    search.setBackground(background(Color.WHITE, 12));
+    root.addView(search, new LinearLayout.LayoutParams(-1, dp(48)));
+    search.addTextChangedListener(new TextWatcher() {
+      @Override public void beforeTextChanged(CharSequence s, int a, int count, int after) {}
+      @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+        filterEntries();
+      }
+      @Override public void afterTextChanged(Editable s) {}
+    });
+
+    list = new ListView(this);
+    list.setDivider(new android.graphics.drawable.ColorDrawable(BG));
+    list.setDividerHeight(dp(5));
+    list.setSelector(new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+    list.setCacheColorHint(Color.TRANSPARENT);
+    adapter = new EntryAdapter();
+    list.setAdapter(adapter);
+    root.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
+
+    empty = text("Aucune application dans cette catégorie.\nConsulte « Toutes ».", 14, MUTED, false);
+    empty.setGravity(Gravity.CENTER);
+    root.addView(empty, new LinearLayout.LayoutParams(-1, 0, 1));
+    list.setEmptyView(empty);
+
+    chosen = text("0 application sélectionnée", 14, DARK, true);
+    root.addView(chosen, margins(0, 10, 0, 7));
+
+    stopButton = new Button(this);
+    stopButton.setText("Sélectionner des applications");
+    stopButton.setAllCaps(false);
+    stopButton.setTextSize(16);
+    stopButton.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+    stopButton.setTextColor(Color.WHITE);
+    stopButton.setBackground(background(TEAL, 16));
+    stopButton.setOnClickListener(v -> stopSelected());
+    root.addView(stopButton, new LinearLayout.LayoutParams(-1, dp(58)));
+
+    report = text("Aucun arrêt automatique. Les cases sont décochées par défaut.", 12, MUTED, false);
+    root.addView(report, margins(0, 10, 0, 4));
+
+    refreshUi("Préparation…");
   }
 
-  private void refresh() {
-    if (busy) return;
-    try {
-      if (!Shizuku.pingBinder()) {
-        status.setText("● Shizuku inactif");
-        button.setText("Ouvrir Shizuku");
-        detail.setText("Démarre Shizuku avant de nettoyer.");
-      } else if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-        status.setText("● Autorisation nécessaire");
-        button.setText("Autoriser le nettoyage");
-        detail.setText("Une autorisation Shizuku est nécessaire.");
-      } else {
-        status.setText("● Prêt à nettoyer");
-        button.setText("Nettoyer maintenant");
-        detail.setText("Un appui. Aucune configuration à choisir.");
-      }
-    } catch (RuntimeException ignored) {
-      status.setText("● Shizuku indisponible");
-      button.setText("Ouvrir Shizuku");
+  private Button tabButton(LinearLayout parent, String title, int value) {
+    Button b = new Button(this);
+    b.setAllCaps(false);
+    b.setTextSize(13);
+    b.setText(title);
+    b.setMinHeight(0);
+    b.setMinimumHeight(0);
+    b.setPadding(0, 0, 0, 0);
+    b.setOnClickListener(v -> {
+      tab = value;
+      filterEntries();
+      paintTabs();
+    });
+    LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(43), 1);
+    p.setMargins(0, 0, dp(value == 2 ? 0 : 5), 0);
+    parent.addView(b, p);
+    return b;
+  }
+
+  private void paintTabs() {
+    Button[] tabs = {runningTab, allTab, protectedTab};
+    for (int i = 0; i < tabs.length; i++) {
+      tabs[i].setBackground(background(i == tab ? TEAL : Color.WHITE, 12));
+      tabs[i].setTextColor(i == tab ? Color.WHITE : DARK);
     }
   }
 
-  private void action() {
+  private void requestScan(boolean explicit) {
     if (busy) return;
     try {
       if (!Shizuku.pingBinder()) {
-        Intent launch = getPackageManager().getLaunchIntentForPackage("moe.shizuku.privileged.api");
-        if (launch != null) startActivity(launch);
-        else startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://shizuku.rikka.app/download/")));
+        cleaner = null;
+        snapshotValid = false;
+        if (explicit) openShizuku();
+        loadEntries(null);
         return;
       }
-      pendingCleanup = true;
       if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-        Shizuku.requestPermission(REQUEST_SHIZUKU);
+        if (explicit) Shizuku.requestPermission(SHIZUKU_PERMISSION);
+        else loadEntries(null);
         return;
       }
-      bindAndClean();
-    } catch (RuntimeException ex) {
-      showFailure("Shizuku inaccessible. Vérifie son état.");
+      if (cleaner != null) {
+        loadEntries(cleaner);
+      } else if (!binding) {
+        binding = true;
+        status.setText("Connexion à Shizuku…");
+        userArgs = new Shizuku.UserServiceArgs(new ComponentName(this, CleanerService.class))
+            .processNameSuffix("cleaner").daemon(false).version(2).debuggable(BuildConfig.DEBUG);
+        Shizuku.bindUserService(userArgs, connection);
+      }
+    } catch (Exception e) {
+      binding = false;
+      report.setText("Connexion Shizuku impossible : " + e.getClass().getSimpleName());
+      loadEntries(null);
     }
   }
 
-  private void bindAndClean() {
-    if (cleaner != null) { runCleanup(); return; }
-    busy = true;
-    button.setEnabled(false);
-    status.setText("● Connexion sécurisée…");
-    serviceArgs = new Shizuku.UserServiceArgs(new ComponentName(this,CleanerService.class))
-        .processNameSuffix("cleaner").daemon(false).version(1).debuggable(BuildConfig.DEBUG);
-    try {
-      Shizuku.bindUserService(serviceArgs,connection);
-    } catch (RuntimeException ex) {
-      showFailure("Impossible de connecter le service Shizuku.");
-    }
+  private void openShizuku() {
+    Intent launch = getPackageManager().getLaunchIntentForPackage("moe.shizuku.privileged.api");
+    if (launch != null) startActivity(launch);
   }
 
-  private void runCleanup() {
-    if (cleaner == null) return;
+  private void loadEntries(ICleanerService service) {
+    if (busy) return;
     busy = true;
-    button.setEnabled(false);
-    status.setText("● Analyse en cours…");
-    detail.setText("Identification des applications et protections.");
-    executor.execute(() -> {
+    scanButton.setEnabled(false);
+    snapshotValid = false;
+    selected.clear();
+    refreshUi("Analyse des applications…");
+    worker.execute(() -> {
+      String snapshot = null;
+      if (service != null) {
+        try { snapshot = service.getProcessSnapshot(); }
+        catch (Exception ignored) {}
+      }
+      final boolean valid = snapshot != null && !snapshot.trim().isEmpty();
+      final Set<String> running = valid ?
+          ProcessParser.runningPackages(snapshot) : Collections.emptySet();
+      final ArrayList<Entry> inventory = new ArrayList<>();
       try {
-        ICleanerService remote = cleaner;
-        if (remote == null) throw new RemoteException("Service indisponible");
-        Set<String> running = ProcessParser.runningPackages(remote.getProcessSnapshot());
-        // Refus de nettoyer en cas d'analyse absente ou non reconnue.
-        if (running.isEmpty()) {
-          runOnUiThread(() -> showFailure("Impossible de lire les processus. Aucun arrêt."));
-          return;
-        }
         PackageManager pm = getPackageManager();
         SafetyPolicy policy = new SafetyPolicy(this);
-        List<PackageInfo> apps = pm.getInstalledPackages(
-            PackageManager.GET_PERMISSIONS | PackageManager.GET_ACTIVITIES);
-        List<PackageInfo> eligible = new ArrayList<>();
-        int protectedCount = 0;
-        for (PackageInfo app : apps) {
-          if (!running.contains(app.packageName)) continue;
-          if (policy.canStop(app)) eligible.add(app);
-          else protectedCount++;
+        for (PackageInfo pkg : pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)) {
+          if (pkg.applicationInfo == null) continue;
+          String title = String.valueOf(pm.getApplicationLabel(pkg.applicationInfo));
+          boolean protect = !policy.canStop(pkg);
+          boolean system = (pkg.applicationInfo.flags &
+              (ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0;
+          inventory.add(new Entry(pkg.packageName, title, system, protect,
+              running.contains(pkg.packageName)));
         }
-        final int ignored = protectedCount;
-        if (eligible.isEmpty()) {
-          runOnUiThread(() -> display(0,ignored,Collections.emptyList(),0,0));
-          return;
-        }
-        Collections.sort(eligible,(a,b) -> a.packageName.compareTo(b.packageName));
-        // Nombre maximal conservateur par passage.
-        int count = Math.min(eligible.size(),100);
-        String[] targets = new String[count];
-        Map<String,String> labels = new HashMap<>();
-        for (int i = 0; i < count; i++) {
-          PackageInfo p = eligible.get(i);
-          targets[i] = p.packageName;
-          labels.put(p.packageName,String.valueOf(pm.getApplicationLabel(p.applicationInfo)));
-        }
-        runOnUiThread(() -> status.setText("● Arrêt des applications éligibles…"));
-        String response = remote.stopPackages(targets);
-        Set<String> reported = new HashSet<>();
-        Set<String> accepted = new HashSet<>();
-        int errors = 0;
-        for (String line : response.split("\\R")) {
-          String[] parts = line.split("\\t",2);
-          if (parts.length != 2 || !labels.containsKey(parts[1]) || !reported.add(parts[1])) continue;
-          if ("OK".equals(parts[0])) accepted.add(parts[1]);
-          else errors++;
-        }
-        errors += Math.max(0,count-reported.size());
-        Set<String> after = ProcessParser.runningPackages(remote.getProcessSnapshot());
-        List<String> verified = new ArrayList<>();
-        int uncertain = 0;
-        for (String pkg : accepted) {
-          if (!after.isEmpty() && !after.contains(pkg)) verified.add(labels.get(pkg));
-          else uncertain++;
-        }
-        final int finalErrors = errors, finalUncertain = uncertain;
-        runOnUiThread(() -> display(verified.size(),ignored,verified,finalErrors,finalUncertain));
+        Collections.sort(inventory, (a, b) -> a.title.compareToIgnoreCase(b.title));
+        final boolean canInspect = valid && !running.isEmpty();
+        runOnUiThread(() -> {
+          entries.clear();
+          entries.addAll(inventory);
+          loaded = true;
+          snapshotValid = canInspect;
+          busy = false;
+          scanButton.setEnabled(true);
+          if (!canInspect) tab = 1; // Toujours montrer les applications, même sans Shizuku.
+          filterEntries();
+          refreshUi(canInspect ? "Inventaire actualisé" : "Applications installées · état inconnu");
+          if (!canInspect) report.setText(
+              "Processus non détectés. Lance Shizuku et appuie sur Actualiser. Aucun arrêt possible.");
+          else report.setText("Choisis les applications. Aucune ne sera arrêtée sans appui sur le bouton.");
+        });
       } catch (Exception e) {
-        runOnUiThread(() -> showFailure("Analyse interrompue : " + e.getClass().getSimpleName()));
+        runOnUiThread(() -> {
+          busy = false;
+          scanButton.setEnabled(true);
+          refreshUi("Inventaire impossible");
+          report.setText("Erreur pendant l'inventaire : " + e.getClass().getSimpleName());
+        });
       }
     });
   }
 
-  private void display(int stopped,int protectedCount,List<String> names,int errors,int unconfirmed) {
-    busy = false;
-    pendingCleanup = false;
-    button.setEnabled(true);
-    status.setText("● Nettoyage terminé");
-    button.setText("Nettoyer maintenant");
-    total.setText(String.valueOf(stopped));
-    detail.setText(stopped == 0 ? "Aucun arrêt confirmé." : stopped + " application(s) arrêtée(s) et vérifiée(s).");
-    StringBuilder text = new StringBuilder();
-    text.append(stopped).append(" arrêt(s) vérifiés\n");
-    text.append(protectedCount).append(" application(s) préservée(s) par sécurité");
-    if (errors != 0) text.append("\n").append(errors).append(" échec(s)");
-    if (unconfirmed != 0) text.append("\n").append(unconfirmed).append(" arrêt(s) non confirmés");
-    if (!names.isEmpty()) {
-      Collections.sort(names);
-      text.append("\n\nApplications concernées :");
-      for (String name : names) text.append("\n• ").append(name);
+  private void filterEntries() {
+    if (adapter == null) return;
+    String q = search.getText().toString().trim().toLowerCase(java.util.Locale.ROOT);
+    filtered.clear();
+    for (Entry item : entries) {
+      if (tab == 0 && !item.running) continue;
+      if (tab == 2 && !item.protectedApp) continue;
+      if (!q.isEmpty() &&
+          !item.title.toLowerCase(java.util.Locale.ROOT).contains(q) &&
+          !item.pkg.toLowerCase(java.util.Locale.ROOT).contains(q)) continue;
+      filtered.add(item);
     }
-    result.setText(text.toString());
+    adapter.notifyDataSetChanged();
+    paintTabs();
+    updateSelection();
   }
 
-  private void showFailure(String message) {
-    busy = false;
-    pendingCleanup = false;
-    if (button != null) button.setEnabled(true);
-    if (detail != null) detail.setText(message);
-    if (result != null) result.setText(message);
-    refresh();
+  private void toggle(Entry item) {
+    if (busy || !snapshotValid || !item.running || item.protectedApp) return;
+    if (!selected.add(item.pkg)) selected.remove(item.pkg);
+    adapter.notifyDataSetChanged();
+    updateSelection();
+  }
+
+  private void updateSelection() {
+    int n = selected.size();
+    chosen.setText(n + (n > 1 ? " applications sélectionnées" : " application sélectionnée"));
+    stopButton.setText(n == 0 ? "Sélectionne les applications à arrêter" :
+        "Forcer l'arrêt (" + n + ")");
+    stopButton.setEnabled(!busy && snapshotValid && n > 0);
+    stopButton.setAlpha(stopButton.isEnabled() ? 1f : .5f);
+  }
+
+  private void refreshUi(String message) {
+    if (status == null) return;
+    status.setText(message);
+    int running = 0, selectable = 0, protectedCount = 0;
+    for (Entry e : entries) {
+      if (e.running) {
+        running++;
+        if (!e.protectedApp) selectable++;
+      }
+      if (e.protectedApp) protectedCount++;
+    }
+    overview.setText(entries.size() + " installées  ·  " +
+        (snapshotValid ? running + " processus présents" : "activité inconnue") +
+        "  ·  " + selectable + " sélectionnables");
+    updateSelection();
+  }
+
+  private void stopSelected() {
+    if (busy || !snapshotValid || selected.isEmpty() || cleaner == null) return;
+    final Set<String> requested = new HashSet<>(selected);
+    busy = true;
+    scanButton.setEnabled(false);
+    refreshUi("Vérification avant arrêt…");
+    worker.execute(() -> {
+      try {
+        ICleanerService service = cleaner;
+        if (service == null) throw new IllegalStateException("Shizuku absent");
+        Set<String> before = ProcessParser.runningPackages(service.getProcessSnapshot());
+        if (before.isEmpty()) throw new IllegalStateException("Liste des processus indisponible");
+        SafetyPolicy safety = new SafetyPolicy(this);
+        PackageManager pm = getPackageManager();
+        ArrayList<String> targets = new ArrayList<>();
+        Map<String, String> names = new HashMap<>();
+        for (String name : requested) {
+          if (!before.contains(name)) continue;
+          try {
+            PackageInfo pkg = pm.getPackageInfo(name, PackageManager.GET_PERMISSIONS);
+            if (safety.canStop(pkg)) {
+              targets.add(name);
+              names.put(name, String.valueOf(pm.getApplicationLabel(pkg.applicationInfo)));
+            }
+          } catch (PackageManager.NameNotFoundException ignored) {}
+        }
+        Collections.sort(targets);
+        if (targets.isEmpty()) {
+          runOnUiThread(() -> {
+            busy = false;
+            scanButton.setEnabled(true);
+            selected.clear();
+            refreshUi("Aucune application encore éligible");
+            report.setText("Aucun arrêt : les applications sélectionnées sont fermées ou protégées.");
+            requestScan(false);
+          });
+          return;
+        }
+        String response = service.stopPackages(targets.toArray(new String[0]));
+        Set<String> accepted = new HashSet<>();
+        for (String line : response.split("\\R")) {
+          String[] parts = line.split("\\t", 2);
+          if (parts.length == 2 && "OK".equals(parts[0]) && names.containsKey(parts[1]))
+            accepted.add(parts[1]);
+        }
+        String afterRaw = service.getProcessSnapshot();
+        Set<String> after = ProcessParser.runningPackages(afterRaw);
+        boolean canVerify = afterRaw != null && !afterRaw.trim().isEmpty() && !after.isEmpty();
+        List<String> stopped = new ArrayList<>();
+        for (String pkg : accepted)
+          if (canVerify && !after.contains(pkg)) stopped.add(names.get(pkg));
+        Collections.sort(stopped);
+        final int acceptedCount = accepted.size(), verified = stopped.size(), attempted = targets.size();
+        runOnUiThread(() -> {
+          busy = false;
+          selected.clear();
+          scanButton.setEnabled(true);
+          report.setText(attempted + " arrêt(s) demandé(s), " + acceptedCount +
+              " commande(s) acceptée(s), " + verified + " arrêt(s) vérifié(s)." +
+              (stopped.isEmpty() ? "" : "\n" + android.text.TextUtils.join(", ", stopped)) +
+              "\nNote : notifications et tâches peuvent être interrompues jusqu'à la réouverture.");
+          requestScan(false);
+        });
+      } catch (Exception error) {
+        runOnUiThread(() -> {
+          busy = false;
+          scanButton.setEnabled(true);
+          refreshUi("Arrêt interrompu");
+          report.setText("Aucun résultat confirmé : " + error.getClass().getSimpleName());
+        });
+      }
+    });
+  }
+
+  private final class EntryAdapter extends BaseAdapter {
+    @Override public int getCount() { return filtered.size(); }
+    @Override public Entry getItem(int position) { return filtered.get(position); }
+    @Override public long getItemId(int position) { return position; }
+
+    @Override public View getView(int position, View oldView, ViewGroup parent) {
+      Entry item = getItem(position);
+      LinearLayout row = new LinearLayout(MainActivity.this);
+      row.setPadding(dp(10), dp(10), dp(9), dp(10));
+      row.setGravity(Gravity.CENTER_VERTICAL);
+      row.setBackground(background(Color.WHITE, 12));
+
+      ImageView icon = new ImageView(MainActivity.this);
+      try {
+        Drawable drawable = getPackageManager().getApplicationIcon(item.pkg);
+        icon.setImageDrawable(drawable);
+      } catch (Exception ignored) {
+        icon.setImageResource(android.R.drawable.sym_def_app_icon);
+      }
+      row.addView(icon, new LinearLayout.LayoutParams(dp(39), dp(39)));
+
+      LinearLayout labels = new LinearLayout(MainActivity.this);
+      labels.setOrientation(LinearLayout.VERTICAL);
+      LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
+      lp.setMargins(dp(12), 0, dp(6), 0);
+      row.addView(labels, lp);
+      TextView name = text(item.title, 14, DARK, true);
+      name.setMaxLines(1);
+      name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+      labels.addView(name);
+      String state;
+      if (item.protectedApp)
+        state = item.system ? "Protégée · système" : "Protégée · fonction sensible";
+      else if (!snapshotValid)
+        state = "État d'activité inconnu";
+      else
+        state = item.running ? "Processus détecté · sélectionnable" : "Pas de processus détecté";
+      labels.addView(text(state, 11, item.protectedApp ? MUTED : TEAL, false));
+
+      if (item.protectedApp) {
+        TextView lock = text("🔒", 19, MUTED, false);
+        row.addView(lock);
+      } else {
+        CheckBox checkbox = new CheckBox(MainActivity.this);
+        checkbox.setButtonTintList(ColorStateList.valueOf(TEAL));
+        checkbox.setChecked(selected.contains(item.pkg));
+        checkbox.setEnabled(item.running && snapshotValid && !busy);
+        checkbox.setOnClickListener(v -> toggle(item));
+        row.addView(checkbox, new LinearLayout.LayoutParams(dp(44), dp(48)));
+      }
+      row.setOnClickListener(v -> toggle(item));
+      return row;
+    }
+  }
+
+  private static final class Entry {
+    final String pkg, title;
+    final boolean system, protectedApp, running;
+    Entry(String pkg, String title, boolean system, boolean protectedApp, boolean running) {
+      this.pkg = pkg;
+      this.title = title;
+      this.system = system;
+      this.protectedApp = protectedApp;
+      this.running = running;
+    }
   }
 
   @Override protected void onDestroy() {
     Shizuku.removeBinderReceivedListener(received);
     Shizuku.removeBinderDeadListener(dead);
     Shizuku.removeRequestPermissionResultListener(permission);
-    executor.shutdownNow();
-    if (bound && serviceArgs != null) {
-      try { Shizuku.unbindUserService(serviceArgs,connection,true); }
+    worker.shutdownNow();
+    if (bound && userArgs != null) {
+      try { Shizuku.unbindUserService(userArgs, connection, true); }
       catch (RuntimeException ignored) {}
     }
     super.onDestroy();
   }
 
-  private TextView label(String content,int size,int color,boolean bold) {
+  private TextView text(String value, int sp, int color, boolean heavy) {
     TextView view = new TextView(this);
-    view.setText(content);
-    view.setTextSize(size);
+    view.setText(value);
+    view.setTextSize(sp);
     view.setTextColor(color);
-    if (bold) view.setTypeface(Typeface.DEFAULT,Typeface.BOLD);
-    view.setLineSpacing(dp(3),1f);
+    if (heavy) view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
     return view;
   }
 
-  private GradientDrawable shape(int color,int radius) {
-    GradientDrawable d = new GradientDrawable();
-    d.setColor(color);
-    d.setCornerRadius(dp(radius));
-    return d;
+  private GradientDrawable background(int color, int radius) {
+    GradientDrawable drawable = new GradientDrawable();
+    drawable.setColor(color);
+    drawable.setCornerRadius(dp(radius));
+    return drawable;
   }
 
-  private LinearLayout.LayoutParams margin(int left,int top,int right,int bottom) {
-    LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1,-2);
-    p.setMargins(dp(left),dp(top),dp(right),dp(bottom));
+  private LinearLayout.LayoutParams margins(int left, int top, int right, int bottom) {
+    LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
+    p.setMargins(dp(left), dp(top), dp(right), dp(bottom));
     return p;
   }
 
-  private int dp(float size) {
-    return (int)(size*getResources().getDisplayMetrics().density+0.5f);
+  private int dp(float n) {
+    return (int) (n * getResources().getDisplayMetrics().density + .5f);
   }
 }

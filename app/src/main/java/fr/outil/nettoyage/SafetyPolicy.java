@@ -1,17 +1,15 @@
 package fr.outil.nettoyage;
 
-import android.Manifest;
 import android.app.admin.DevicePolicyManager;
-import android.app.role.RoleManager;
+import android.telecom.TelecomManager;
+import android.provider.Telephony;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
-import android.os.Build;
 import android.provider.Settings;
 import android.view.inputmethod.InputMethod;
 import android.accessibilityservice.AccessibilityService;
@@ -37,14 +35,12 @@ public final class SafetyPolicy {
       "com.motorola.", "com.transsion.", "com.lenovo.", "com.sony.",
       "org.lineageos.", "moe.shizuku.", "rikka.shizuku."
   };
+  // Ces permissions signalent des fonctions pour lesquelles l'arrêt est déconseillé.
+  // RECEIVE_BOOT_COMPLETED, POST_NOTIFICATIONS et FOREGROUND_SERVICE seuls
+  // ne prouvent PAS qu'une application est essentielle.
   private static final Set<String> RISK_PERMISSIONS = new HashSet<>(Arrays.asList(
-      Manifest.permission.RECEIVE_BOOT_COMPLETED,
-      "android.permission.FOREGROUND_SERVICE",
-      "android.permission.POST_NOTIFICATIONS",
       "android.permission.SCHEDULE_EXACT_ALARM",
       "android.permission.USE_EXACT_ALARM",
-      "android.permission.ACCESS_BACKGROUND_LOCATION",
-      "android.permission.SYSTEM_ALERT_WINDOW",
       "android.permission.BIND_ACCESSIBILITY_SERVICE",
       "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE",
       "android.permission.BIND_VPN_SERVICE",
@@ -82,7 +78,7 @@ public final class SafetyPolicy {
     if (pm.getLaunchIntentForPackage(pkg) == null) return false;
     if (info.requestedPermissions != null) {
       for (String perm : info.requestedPermissions) {
-        if (RISK_PERMISSIONS.contains(perm) || perm.startsWith("android.permission.FOREGROUND_SERVICE_"))
+        if (RISK_PERMISSIONS.contains(perm))
           return false;
       }
     }
@@ -110,21 +106,22 @@ public final class SafetyPolicy {
   }
 
   private void protectRoles() {
-    if (Build.VERSION.SDK_INT < 29) return;
     try {
-      RoleManager manager = context.getSystemService(RoleManager.class);
-      if (manager == null) return;
-      String[] roles = {RoleManager.ROLE_HOME, RoleManager.ROLE_DIALER,
-          RoleManager.ROLE_SMS, RoleManager.ROLE_ASSISTANT,
-          RoleManager.ROLE_CALL_SCREENING, RoleManager.ROLE_EMERGENCY,
-          RoleManager.ROLE_BROWSER};
-      for (String role : roles) {
-        try {
-          // Conserver uniquement les applications associées via les composants connus.
-          // getRoleHolders n'est pas exposé dans toutes les variantes SDK.
-        } catch (RuntimeException ignored) {}
-      }
+      Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
+      ResolveInfo launcher = pm.resolveActivity(home, PackageManager.MATCH_DEFAULT_ONLY);
+      if (launcher != null && launcher.activityInfo != null)
+        protectedPackages.add(launcher.activityInfo.packageName);
     } catch (RuntimeException ignored) {}
+    try {
+      TelecomManager tel = (TelecomManager)context.getSystemService(Context.TELECOM_SERVICE);
+      if (tel != null && tel.getDefaultDialerPackage() != null)
+        protectedPackages.add(tel.getDefaultDialerPackage());
+    } catch (RuntimeException ignored) {}
+    try {
+      String sms = Telephony.Sms.getDefaultSmsPackage(context);
+      if (sms != null) protectedPackages.add(sms);
+    } catch (RuntimeException ignored) {}
+    protectSecureComponents("assistant");
   }
 
   private void protectSecureComponents(String key) {
