@@ -19,7 +19,7 @@ public final class ProcessParser {
     for (String line : output.split("\\R")) {
       String[] tokens = line.trim().split("\\s+");
       if (tokens.length == 0) continue;
-      String base = tokens[0].split(":", 2)[0];
+      String base = tokens[tokens.length - 1].split(":", 2)[0];
       if (isValidPackage(base)) found.add(base);
     }
     return found;

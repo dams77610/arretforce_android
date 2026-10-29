@@ -1,6 +1,7 @@
 package fr.outil.nettoyage;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.ServiceConnection;
@@ -56,6 +57,7 @@ public final class MainActivity extends Activity {
   private final List<Entry> entries = new ArrayList<>();
   private final List<Entry> filtered = new ArrayList<>();
   private final Set<String> selected = new HashSet<>();
+  private final Set<String> acceptedCautions = new HashSet<>();
 
   private TextView status, overview, empty, chosen, report;
   private Button scanButton, stopButton, runningTab, allTab, protectedTab;
@@ -125,6 +127,11 @@ public final class MainActivity extends Activity {
     root.setOrientation(LinearLayout.VERTICAL);
     root.setBackgroundColor(BG);
     root.setPadding(dp(17), dp(19), dp(17), dp(12));
+    root.setOnApplyWindowInsetsListener((view, insets) -> {
+      android.graphics.Insets bars = insets.getInsets(android.view.WindowInsets.Type.systemBars());
+      view.setPadding(dp(17), dp(19) + bars.top, dp(17), dp(12) + bars.bottom);
+      return insets;
+    });
     setContentView(root);
 
     TextView eyebrow = text("ENTRETIEN ANDROID  ·  V0.2", 12, TEAL, true);
@@ -270,12 +277,20 @@ public final class MainActivity extends Activity {
     if (launch != null) startActivity(launch);
   }
 
+  private boolean shizukuReady() {
+    try {
+      return cleaner != null && Shizuku.pingBinder() &&
+          Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED;
+    } catch (Exception e) { return false; }
+  }
+
   private void loadEntries(ICleanerService service) {
     if (busy) return;
     busy = true;
     scanButton.setEnabled(false);
     snapshotValid = false;
     selected.clear();
+    acceptedCautions.clear();
     refreshUi("Analyse des applications…");
     worker.execute(() -> {
       String snapshot = null;
@@ -283,9 +298,10 @@ public final class MainActivity extends Activity {
         try { snapshot = service.getProcessSnapshot(); }
         catch (Exception ignored) {}
       }
-      final boolean valid = snapshot != null && !snapshot.trim().isEmpty();
+      final String snapshotText = snapshot;
+      final boolean valid = snapshotText != null && !snapshotText.trim().isEmpty() && !snapshotText.startsWith("#ERROR:");
       final Set<String> running = valid ?
-          ProcessParser.runningPackages(snapshot) : Collections.emptySet();
+          ProcessParser.runningPackages(snapshotText) : Collections.emptySet();
       final ArrayList<Entry> inventory = new ArrayList<>();
       try {
         PackageManager pm = getPackageManager();
@@ -293,10 +309,11 @@ public final class MainActivity extends Activity {
         for (PackageInfo pkg : pm.getInstalledPackages(PackageManager.GET_PERMISSIONS)) {
           if (pkg.applicationInfo == null) continue;
           String title = String.valueOf(pm.getApplicationLabel(pkg.applicationInfo));
-          boolean protect = !policy.canStop(pkg);
+          boolean hard = policy.isHardProtected(pkg);
+          boolean caution = !hard && policy.isCaution(pkg);
           boolean system = (pkg.applicationInfo.flags &
               (ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0;
-          inventory.add(new Entry(pkg.packageName, title, system, protect,
+          inventory.add(new Entry(pkg.packageName, title, system, hard, caution,
               running.contains(pkg.packageName)));
         }
         Collections.sort(inventory, (a, b) -> a.title.compareToIgnoreCase(b.title));
@@ -310,11 +327,15 @@ public final class MainActivity extends Activity {
           scanButton.setEnabled(true);
           if (!canInspect) tab = 1; // Toujours montrer les applications, même sans Shizuku.
           filterEntries();
-          refreshUi(canInspect ? "Inventaire actualisé" : "Applications installées · état inconnu");
-          if (!canInspect) report.setText(
-              "Processus non détectés. Lance Shizuku et appuie sur Actualiser. Aucun arrêt possible.");
-          else report.setText(lastStopReport.isEmpty()
-              ? "Choisis les applications. Aucune ne sera arrêtée sans appui sur le bouton."
+          refreshUi(canInspect ? "Inventaire actualisé" :
+              (shizukuReady() ? "Shizuku connecté · activité inconnue"
+                              : "Shizuku arrêté ou non autorisé"));
+          if (!canInspect) {
+            if (!shizukuReady()) report.setText("Shizuku non connecté ou non autorisé. Vérifie Shizuku puis Actualiser. Aucun arrêt possible.");
+            else report.setText("Shizuku connecté mais activité non détectée. Sélection manuelle des applications tierces possible." +
+                (snapshotText != null && snapshotText.startsWith("#ERROR:") ? " Diagnostic : " + snapshotText : ""));
+          } else report.setText(lastStopReport.isEmpty()
+              ? "Choisis les applications souhaitées. Aucun arrêt automatique."
               : lastStopReport);
         });
       } catch (Exception e) {
@@ -334,7 +355,7 @@ public final class MainActivity extends Activity {
     filtered.clear();
     for (Entry item : entries) {
       if (tab == 0 && !item.running) continue;
-      if (tab == 2 && !item.protectedApp) continue;
+      if (tab == 2 && !item.hardProtected && !item.caution) continue;
       if (!q.isEmpty() &&
           !item.title.toLowerCase(java.util.Locale.ROOT).contains(q) &&
           !item.pkg.toLowerCase(java.util.Locale.ROOT).contains(q)) continue;
@@ -346,8 +367,31 @@ public final class MainActivity extends Activity {
   }
 
   private void toggle(Entry item) {
-    if (busy || !snapshotValid || !item.running || item.protectedApp) return;
-    if (!selected.add(item.pkg)) selected.remove(item.pkg);
+    if (busy || !shizukuReady() || item.hardProtected) return;
+    if (selected.remove(item.pkg)) {
+      acceptedCautions.remove(item.pkg);
+      adapter.notifyDataSetChanged();
+      updateSelection();
+      return;
+    }
+    if (item.caution) {
+      new AlertDialog.Builder(this)
+          .setTitle("Protection conseillée")
+          .setMessage(item.title + " peut assurer des notifications, des alarmes ou un service utile." +
+              "\\n\\nSon arrêt forcé peut perturber ces fonctions jusqu'à sa réouverture." +
+              "\\n\\nVeux-tu vraiment la sélectionner ?")
+          .setNegativeButton("Annuler", (d, which) -> adapter.notifyDataSetChanged())
+          .setPositiveButton("Choisir quand même", (d, which) -> {
+            if (!busy && shizukuReady()) {
+              acceptedCautions.add(item.pkg);
+              selected.add(item.pkg);
+              adapter.notifyDataSetChanged();
+              updateSelection();
+            }
+          }).show();
+      return;
+    }
+    selected.add(item.pkg);
     adapter.notifyDataSetChanged();
     updateSelection();
   }
@@ -357,7 +401,7 @@ public final class MainActivity extends Activity {
     chosen.setText(n + (n > 1 ? " applications sélectionnées" : " application sélectionnée"));
     stopButton.setText(n == 0 ? "Sélectionne les applications à arrêter" :
         "Forcer l'arrêt (" + n + ")");
-    stopButton.setEnabled(!busy && snapshotValid && n > 0);
+    stopButton.setEnabled(!busy && shizukuReady() && n > 0);
     stopButton.setAlpha(stopButton.isEnabled() ? 1f : .5f);
   }
 
@@ -366,21 +410,20 @@ public final class MainActivity extends Activity {
     status.setText(message);
     int running = 0, selectable = 0, protectedCount = 0;
     for (Entry e : entries) {
-      if (e.running) {
-        running++;
-        if (!e.protectedApp) selectable++;
-      }
-      if (e.protectedApp) protectedCount++;
+      if (e.running) running++;
+      if (!e.hardProtected) selectable++;
+      if (e.hardProtected) protectedCount++;
     }
     overview.setText(entries.size() + " installées  ·  " +
         (snapshotValid ? running + " processus présents" : "activité inconnue") +
-        "  ·  " + selectable + " sélectionnables");
+        "  ·  " + (shizukuReady() ? selectable + " choix possibles" : "Shizuku non connecté"));
     updateSelection();
   }
 
   private void stopSelected() {
-    if (busy || !snapshotValid || selected.isEmpty() || cleaner == null) return;
+    if (busy || !shizukuReady() || selected.isEmpty() || cleaner == null) return;
     final Set<String> requested = new HashSet<>(selected);
+    final Set<String> confirmed = new HashSet<>(acceptedCautions);
     busy = true;
     scanButton.setEnabled(false);
     refreshUi("Vérification avant arrêt…");
@@ -388,17 +431,18 @@ public final class MainActivity extends Activity {
       try {
         ICleanerService service = cleaner;
         if (service == null) throw new IllegalStateException("Shizuku absent");
-        Set<String> before = ProcessParser.runningPackages(service.getProcessSnapshot());
-        if (before.isEmpty()) throw new IllegalStateException("Liste des processus indisponible");
+        String beforeRaw = service.getProcessSnapshot();
+        Set<String> before = ProcessParser.runningPackages(beforeRaw);
+        boolean observed = beforeRaw != null && !beforeRaw.startsWith("#ERROR:") && !before.isEmpty();
         SafetyPolicy safety = new SafetyPolicy(this);
         PackageManager pm = getPackageManager();
         ArrayList<String> targets = new ArrayList<>();
         Map<String, String> names = new HashMap<>();
         for (String name : requested) {
-          if (!before.contains(name)) continue;
+          if (observed && !before.contains(name)) continue;
           try {
             PackageInfo pkg = pm.getPackageInfo(name, PackageManager.GET_PERMISSIONS);
-            if (safety.canStop(pkg)) {
+            if (safety.canStop(pkg, confirmed.contains(name))) {
               targets.add(name);
               names.put(name, String.valueOf(pm.getApplicationLabel(pkg.applicationInfo)));
             }
@@ -410,6 +454,7 @@ public final class MainActivity extends Activity {
             busy = false;
             scanButton.setEnabled(true);
             selected.clear();
+            acceptedCautions.clear();
             refreshUi("Aucune application encore éligible");
             report.setText("Aucun arrêt : les applications sélectionnées sont fermées ou protégées.");
             requestScan(false);
@@ -434,6 +479,7 @@ public final class MainActivity extends Activity {
         runOnUiThread(() -> {
           busy = false;
           selected.clear();
+          acceptedCautions.clear();
           scanButton.setEnabled(true);
           lastStopReport = attempted + " arrêt(s) demandé(s), " + acceptedCount +
               " commande(s) acceptée(s), " + verified + " arrêt(s) vérifié(s)." +
@@ -484,22 +530,25 @@ public final class MainActivity extends Activity {
       name.setEllipsize(android.text.TextUtils.TruncateAt.END);
       labels.addView(name);
       String state;
-      if (item.protectedApp)
-        state = item.system ? "Protégée · système" : "Protégée · fonction sensible";
+      if (item.hardProtected)
+        state = item.system ? "Système · arrêt désactivé" : "Fonction essentielle · arrêt désactivé";
+      else if (item.caution)
+        state = selected.contains(item.pkg) ? "Attention · sélection confirmée" :
+            "Attention · protection conseillée, choix possible";
       else if (!snapshotValid)
-        state = "État d'activité inconnu";
+        state = "Activité inconnue · choix manuel possible";
       else
         state = item.running ? "Processus détecté · sélectionnable" : "Pas de processus détecté";
-      labels.addView(text(state, 11, item.protectedApp ? MUTED : TEAL, false));
+      labels.addView(text(state, 11, item.hardProtected ? MUTED : TEAL, false));
 
-      if (item.protectedApp) {
+      if (item.hardProtected) {
         TextView lock = text("🔒", 19, MUTED, false);
         row.addView(lock);
       } else {
         CheckBox checkbox = new CheckBox(MainActivity.this);
         checkbox.setButtonTintList(ColorStateList.valueOf(TEAL));
         checkbox.setChecked(selected.contains(item.pkg));
-        checkbox.setEnabled(item.running && snapshotValid && !busy);
+        checkbox.setEnabled(shizukuReady() && !busy);
         checkbox.setOnClickListener(v -> toggle(item));
         row.addView(checkbox, new LinearLayout.LayoutParams(dp(44), dp(48)));
       }
@@ -510,12 +559,14 @@ public final class MainActivity extends Activity {
 
   private static final class Entry {
     final String pkg, title;
-    final boolean system, protectedApp, running;
-    Entry(String pkg, String title, boolean system, boolean protectedApp, boolean running) {
+    final boolean system, hardProtected, caution, running;
+    Entry(String pkg, String title, boolean system, boolean hardProtected,
+          boolean caution, boolean running) {
       this.pkg = pkg;
       this.title = title;
       this.system = system;
-      this.protectedApp = protectedApp;
+      this.hardProtected = hardProtected;
+      this.caution = caution;
       this.running = running;
     }
   }

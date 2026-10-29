@@ -1,11 +1,20 @@
-# Guide V0.2 — sur Android
+# Nettoyage sûr V0.3
 
-1. Vérifier dans Shizuku que le service est **en cours de fonctionnement**.
-2. Depuis ce dépôt, ouvrir **Actions → Compiler APK Android → dernière exécution réussie → Artifacts : NettoyageSur-APK**.
-3. Télécharger le ZIP, en extraire `app-debug.apk`, puis installer par-dessus la V0.1.
-4. Ouvrir Nettoyage sûr et accorder l'autorisation Shizuku si demandée.
-5. Voir les processus dans **En cours**, consulter toutes les applications avec **Toutes**, et les exclusions avec **Protégées**.
-6. Cocher uniquement les applications non essentielles souhaitées, puis appuyer sur **Forcer l'arrêt (N)**. Aucune action sans sélection.
-7. Lire le bilan d'arrêt. Le nombre de commandes acceptées peut différer des arrêts confirmés.
+## Installer sur Android 16
 
-Les applications protégées ne peuvent pas être arrêtées depuis cet outil. Ne pas forcer l'arrêt d'une application dont les notifications ou les tâches sont importantes.
+1. Ouvrir **Shizuku**, vérifier **en cours de fonctionnement**.
+2. Ouvrir **Actions → Compiler APK Android** sur ce dépôt GitHub.
+3. Choisir la dernière exécution **verte**, télécharger **NettoyageSur-APK** dans **Artifacts**.
+4. Extraire le ZIP et installer `app-debug.apk`. Si Android refuse une mise à jour pour signature différente, désinstaller la précédente version puis réinstaller ; aucune liste sauvegardée n'est conservée.
+5. Ouvrir Nettoyage sûr, accepter la demande d'autorisation Shizuku et appuyer sur **Actualiser**.
+
+## Utilisation
+
+- **En cours** : uniquement les processus détectés (peut être vide si Android limite l'inventaire).
+- **Toutes** : applications installées ; sélection manuelle possible même si l'activité ne peut pas être identifiée, **à condition que Shizuku soit connecté**.
+- **Protégées** : deux protections distinctes :
+  - **Système / fonction essentielle** : verrou dur, aucune sélection possible.
+  - **Protection conseillée** : application tierce sélectionnable après avertissement explicite.
+- Les applications ne sont jamais présélectionnées. Le bouton d'arrêt agit uniquement sur la sélection, avec une nouvelle validation de sécurité.
+
+**Attention :** forcer l'arrêt peut interrompre les notifications, synchronisations ou réveils d'une application. Un processus conservé en mémoire ne prouve pas une consommation excessive de ressources. Prototype à tester avec prudence.

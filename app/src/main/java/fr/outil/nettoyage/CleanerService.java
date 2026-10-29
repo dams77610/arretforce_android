@@ -10,8 +10,21 @@ public final class CleanerService extends ICleanerService.Stub {
   public CleanerService() {}
 
   @Override public String getProcessSnapshot() {
-    Result r = execute(new String[] {"/system/bin/ps", "-A", "-o", "ARGS"}, 10);
-    return r.exit == 0 ? r.output : "";
+    // Android varie selon les versions : NAME fonctionne en général sous toybox.
+    // Une sortie vide ne doit jamais être présentée comme « aucune application active ».
+    String[][] candidates = {
+        {"/system/bin/ps", "-A", "-o", "NAME"},
+        {"/system/bin/ps", "-A", "-o", "ARGS"},
+        {"/system/bin/ps", "-A"}
+    };
+    String problem = "commande ps indisponible";
+    for (String[] command : candidates) {
+      Result r = execute(command, 12);
+      if (r.exit == 0 && ProcessParser.runningPackages(r.output).size() > 0)
+        return r.output;
+      problem = "ps exit=" + r.exit;
+    }
+    return "#ERROR:" + problem;
   }
 
   @Override public String stopPackages(String[] packages) {

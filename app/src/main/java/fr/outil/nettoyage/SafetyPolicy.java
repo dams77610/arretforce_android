@@ -60,36 +60,49 @@ public final class SafetyPolicy {
     protectSecureComponents("enabled_notification_listeners");
     protectDeviceAdmins();
     protectServices(InputMethod.SERVICE_INTERFACE);
-    protectServices(AccessibilityService.SERVICE_INTERFACE);
-    protectServices(NotificationListenerService.SERVICE_INTERFACE);
     protectServices(VpnService.SERVICE_INTERFACE);
-    protectWidgetProviders();
   }
 
-  public boolean canStop(PackageInfo info) {
-    if (info == null || info.applicationInfo == null) return false;
+  /** Jamais désactivable depuis l'interface, même sur demande. */
+  public boolean isHardProtected(PackageInfo info) {
+    if (info == null || info.applicationInfo == null) return true;
     String pkg = info.packageName;
     ApplicationInfo app = info.applicationInfo;
-    if (!ProcessParser.isValidPackage(pkg)) return false;
-    if (protectedPackages.contains(pkg)) return false;
-    if (app.uid < android.os.Process.FIRST_APPLICATION_UID) return false;
-    if ((app.flags & (ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0) return false;
-    if (!app.enabled || isCriticalName(pkg)) return false;
-    if (pm.getLaunchIntentForPackage(pkg) == null) return false;
+    if (!ProcessParser.isValidPackage(pkg)) return true;
+    if (pkg.equals(context.getPackageName()) || protectedPackages.contains(pkg)) return true;
+    if (app.uid < android.os.Process.FIRST_APPLICATION_UID) return true;
+    if ((app.flags & (ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0)
+      return true;
+    if (!app.enabled) return true;
+    return isVendorCore(pkg);
+  }
+
+  /** Protection conseillée : l'utilisateur peut la lever pour une application tierce. */
+  public boolean isCaution(PackageInfo info) {
+    if (isHardProtected(info)) return false;
+    if (isCriticalName(info.packageName)) return true;
+    if (pm.getLaunchIntentForPackage(info.packageName) == null) return true;
     if (info.requestedPermissions != null) {
       for (String perm : info.requestedPermissions) {
-        if (RISK_PERMISSIONS.contains(perm))
-          return false;
+        if (RISK_PERMISSIONS.contains(perm)) return true;
       }
     }
-    return true;
+    return false;
+  }
+
+  public boolean canStop(PackageInfo info, boolean userConfirmedCaution) {
+    return !isHardProtected(info) && (!isCaution(info) || userConfirmedCaution);
+  }
+
+  private static boolean isVendorCore(String pkg) {
+    for (String prefix : OS_PREFIXES) {
+      if (pkg.equals(prefix) || pkg.startsWith(prefix)) return true;
+    }
+    return false;
   }
 
   private static boolean isCriticalName(String pkg) {
     String lower = pkg.toLowerCase(Locale.ROOT);
-    for (String prefix : OS_PREFIXES) {
-      if (pkg.equals(prefix) || pkg.startsWith(prefix)) return true;
-    }
     String[] terms = {
         "launcher", "keyboard", "inputmethod", "dialer", "telephony",
         "messaging", "messages", "alarm", "clock", "calendar",
