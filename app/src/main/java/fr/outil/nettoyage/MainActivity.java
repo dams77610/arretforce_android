@@ -66,6 +66,7 @@ public final class MainActivity extends Activity {
   private Shizuku.UserServiceArgs userArgs;
   private boolean busy = false, binding = false, bound = false, snapshotValid = false, loaded = false;
   private int tab = 0; // 0 processus présents, 1 toutes installées, 2 protégées
+  private String lastStopReport = "";
 
   private final Shizuku.OnBinderReceivedListener received = () ->
       runOnUiThread(() -> { if (!busy && !binding) requestScan(false); });
@@ -312,7 +313,9 @@ public final class MainActivity extends Activity {
           refreshUi(canInspect ? "Inventaire actualisé" : "Applications installées · état inconnu");
           if (!canInspect) report.setText(
               "Processus non détectés. Lance Shizuku et appuie sur Actualiser. Aucun arrêt possible.");
-          else report.setText("Choisis les applications. Aucune ne sera arrêtée sans appui sur le bouton.");
+          else report.setText(lastStopReport.isEmpty()
+              ? "Choisis les applications. Aucune ne sera arrêtée sans appui sur le bouton."
+              : lastStopReport);
         });
       } catch (Exception e) {
         runOnUiThread(() -> {
@@ -432,10 +435,11 @@ public final class MainActivity extends Activity {
           busy = false;
           selected.clear();
           scanButton.setEnabled(true);
-          report.setText(attempted + " arrêt(s) demandé(s), " + acceptedCount +
+          lastStopReport = attempted + " arrêt(s) demandé(s), " + acceptedCount +
               " commande(s) acceptée(s), " + verified + " arrêt(s) vérifié(s)." +
               (stopped.isEmpty() ? "" : "\n" + android.text.TextUtils.join(", ", stopped)) +
-              "\nNote : notifications et tâches peuvent être interrompues jusqu'à la réouverture.");
+              "\nNote : notifications et tâches peuvent être interrompues jusqu'à la réouverture.";
+          report.setText(lastStopReport);
           requestScan(false);
         });
       } catch (Exception error) {
