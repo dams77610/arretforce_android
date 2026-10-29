@@ -77,8 +77,7 @@ public final class MainActivity extends Activity {
     bound = false;
     binding = false;
     snapshotValid = false;
-    selected.clear();
-    report.setText("Shizuku s'est arrêté. Les arrêts sont désactivés.");
+    report.setText("Shizuku s'est arrêté. La sélection est conservée, mais les arrêts sont désactivés.");
     refreshUi("Shizuku arrêté");
   });
   private final Shizuku.OnRequestPermissionResultListener permission = (requestCode, grant) -> {
@@ -120,6 +119,11 @@ public final class MainActivity extends Activity {
     Shizuku.addBinderDeadListener(dead);
     Shizuku.addRequestPermissionResultListener(permission);
     if (!busy && !binding && !loaded) requestScan(false);
+  }
+
+  @Override protected void onResume() {
+    super.onResume();
+    if (loaded && !busy && !binding) requestScan(false);
   }
 
   private void createUi() {
@@ -289,8 +293,7 @@ public final class MainActivity extends Activity {
     busy = true;
     scanButton.setEnabled(false);
     snapshotValid = false;
-    selected.clear();
-    acceptedCautions.clear();
+    // Sélection maintenue lors de l'actualisation.
     refreshUi("Analyse des applications…");
     worker.execute(() -> {
       String snapshot = null;
@@ -321,6 +324,12 @@ public final class MainActivity extends Activity {
         runOnUiThread(() -> {
           entries.clear();
           entries.addAll(inventory);
+          Set<String> stillAllowed = new HashSet<>();
+          for (Entry item : inventory)
+            if (!item.hardProtected && (!item.caution || acceptedCautions.contains(item.pkg)))
+              stillAllowed.add(item.pkg);
+          selected.retainAll(stillAllowed);
+          acceptedCautions.retainAll(stillAllowed);
           loaded = true;
           snapshotValid = canInspect;
           busy = false;
@@ -367,7 +376,7 @@ public final class MainActivity extends Activity {
   }
 
   private void toggle(Entry item) {
-    if (busy || !shizukuReady() || item.hardProtected) return;
+    if (busy || item.hardProtected) return;
     if (selected.remove(item.pkg)) {
       acceptedCautions.remove(item.pkg);
       adapter.notifyDataSetChanged();
@@ -382,7 +391,7 @@ public final class MainActivity extends Activity {
               "\\n\\nVeux-tu vraiment la sélectionner ?")
           .setNegativeButton("Annuler", (d, which) -> adapter.notifyDataSetChanged())
           .setPositiveButton("Choisir quand même", (d, which) -> {
-            if (!busy && shizukuReady()) {
+            if (!busy) {
               acceptedCautions.add(item.pkg);
               selected.add(item.pkg);
               adapter.notifyDataSetChanged();
@@ -400,8 +409,8 @@ public final class MainActivity extends Activity {
     int n = selected.size();
     chosen.setText(n + (n > 1 ? " applications sélectionnées" : " application sélectionnée"));
     stopButton.setText(n == 0 ? "Sélectionne les applications à arrêter" :
-        "Forcer l'arrêt (" + n + ")");
-    stopButton.setEnabled(!busy && shizukuReady() && n > 0);
+        (shizukuReady() ? "Forcer l'arrêt (" + n + ")" : "Activer Shizuku pour arrêter (" + n + ")"));
+    stopButton.setEnabled(!busy && n > 0);
     stopButton.setAlpha(stopButton.isEnabled() ? 1f : .5f);
   }
 
@@ -421,7 +430,12 @@ public final class MainActivity extends Activity {
   }
 
   private void stopSelected() {
-    if (busy || !shizukuReady() || selected.isEmpty() || cleaner == null) return;
+    if (busy || selected.isEmpty()) return;
+    if (!shizukuReady()) {
+      report.setText("Shizuku doit être actif et autorisé avant l'arrêt. Ta sélection sera conservée.");
+      requestScan(true);
+      return;
+    }
     final Set<String> requested = new HashSet<>(selected);
     final Set<String> confirmed = new HashSet<>(acceptedCautions);
     busy = true;
@@ -439,7 +453,6 @@ public final class MainActivity extends Activity {
         ArrayList<String> targets = new ArrayList<>();
         Map<String, String> names = new HashMap<>();
         for (String name : requested) {
-          if (observed && !before.contains(name)) continue;
           try {
             PackageInfo pkg = pm.getPackageInfo(name, PackageManager.GET_PERMISSIONS);
             if (safety.canStop(pkg, confirmed.contains(name))) {
@@ -473,7 +486,8 @@ public final class MainActivity extends Activity {
         boolean canVerify = afterRaw != null && !afterRaw.trim().isEmpty() && !after.isEmpty();
         List<String> stopped = new ArrayList<>();
         for (String pkg : accepted)
-          if (canVerify && !after.contains(pkg)) stopped.add(names.get(pkg));
+          if (observed && before.contains(pkg) && canVerify && !after.contains(pkg))
+            stopped.add(names.get(pkg));
         Collections.sort(stopped);
         final int acceptedCount = accepted.size(), verified = stopped.size(), attempted = targets.size();
         runOnUiThread(() -> {
@@ -548,7 +562,7 @@ public final class MainActivity extends Activity {
         CheckBox checkbox = new CheckBox(MainActivity.this);
         checkbox.setButtonTintList(ColorStateList.valueOf(TEAL));
         checkbox.setChecked(selected.contains(item.pkg));
-        checkbox.setEnabled(shizukuReady() && !busy);
+        checkbox.setEnabled(!busy);
         checkbox.setOnClickListener(v -> toggle(item));
         row.addView(checkbox, new LinearLayout.LayoutParams(dp(44), dp(48)));
       }
